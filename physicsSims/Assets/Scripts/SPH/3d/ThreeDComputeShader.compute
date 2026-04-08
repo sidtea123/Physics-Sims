@@ -1,0 +1,109 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CalcAccelerations
+#pragma kernel CalcDensities
+//#pragma kernel Densities
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWStructuredBuffer<float3> _positions;
+RWStructuredBuffer<float3> _velocities;
+RWStructuredBuffer<float3> _accelerations;
+RWStructuredBuffer<float> _densities;
+RWStructuredBuffer<float> _marchingCubesDensities;
+
+int resolution;
+float dt;
+float h;
+float m;
+float g;
+float k;
+float mu;
+float rho0;
+float WPoly6Factor;
+float GradientWSpikyFactor;
+
+float GradientWSpiky(float dst)
+{
+    return -GradientWSpikyFactor * pow(h - dst, 2);
+}
+
+float WPoly6(float sqrDst)
+{
+    if (sqrDst < h * h)
+    {
+        return WPoly6Factor * pow(h * h - sqrDst, 3);
+    }
+    return 0;
+}
+
+float Laplacian(float dst)
+{
+    return 1.4 * (h - dst);
+}
+
+float3 Fg(int i)
+{
+    return _densities[i] * g * float3(0, -1, 0);
+}
+
+float sqrDst(float3 a, float3 b)
+{
+    float3 c = a - b;
+    return c.x * c.x + c.y * c.y + c.z * c.z;
+}
+
+float P(int i)
+{
+    return k * (_densities[i] - rho0);
+}
+
+float CalculateDensity(int i)
+{
+    float sum = 0;
+
+    for (int j = 0; j < resolution * resolution * resolution; j++)
+    {
+        sum += WPoly6(sqrDst(_positions[i], _positions[j]));
+    }
+
+    return sum * m;
+}
+
+float3 FNet(int i)
+{
+    float3 sum = 0;
+    for (int j = 0; j < resolution * resolution * resolution; j++)
+    {
+        float dst = distance(_positions[i], _positions[j]);
+        if (j == i || dst > h || dst == 0)
+        {
+            continue;
+        }
+
+        // FPressure
+        sum -= (P(i) + P(j)) * GradientWSpiky(dst) * normalize(_positions[i] - _positions[j]) / (2 * _densities[j]);
+
+        // FViscosity
+        sum += mu * (_velocities[j] - _velocities[i]) * Laplacian(dst)  / _densities[j];
+    }
+
+    return sum * m + Fg(i);
+}
+
+[numthreads(8,8,1)]
+void CalcAccelerations (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < resolution * resolution && id.y < resolution * resolution) {
+        int i = id.x + id.y * resolution * resolution;
+        _accelerations[i] = FNet(i) / _densities[i];
+	}
+}
+
+[numthreads(8,8,1)]
+void CalcDensities (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < resolution * resolution && id.y < resolution * resolution) {
+        int i = id.x + id.y * resolution * resolution;
+        _densities[i] = CalculateDensity(i);
+    }
+}
